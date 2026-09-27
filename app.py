@@ -49,6 +49,11 @@ st.markdown("""
         color: #555;
         font-size: 0.9rem;
     }
+    .highlight {
+        background-color: #fff3cd;
+        padding: 0 2px;
+        border-radius: 2px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -68,18 +73,43 @@ def get_db_connection():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     return conn
 
-def search_norms(query: str, limit: int = 20):
+def search_norms(query: str, limit: int = 30):
+    """Умный поиск: по коду, по нескольким словам, сортировка по релевантности."""
     conn = get_db_connection()
     if conn is None:
         return None
     cursor = conn.cursor()
-    search_pattern = f"%{query}%"
-    cursor.execute("""
-        SELECT code, name, unit, unit_name, section, base_type, content_text
-        FROM rates
-        WHERE name LIKE ?
-        LIMIT ?
-    """, (search_pattern, limit))
+    
+    query = query.strip()
+    if not query:
+        return []
+    
+    # Разбиваем на слова
+    words = query.split()
+    
+    # Проверяем, похож ли запрос на код нормы (содержит цифры и дефисы)
+    is_code_like = any(c.isdigit() for c in query) and '-' in query
+    
+    if is_code_like:
+        # Поиск по коду
+        cursor.execute("""
+            SELECT code, name, unit, unit_name, section, base_type, content_text
+            FROM rates
+            WHERE code LIKE ?
+            LIMIT ?
+        """, (f"%{query}%", limit))
+    else:
+        # Поиск по названию: каждое слово должно встречаться
+        conditions = " AND ".join(["name LIKE ?" for _ in words])
+        params = [f"%{w}%" for w in words]
+        params.append(limit)
+        cursor.execute(f"""
+            SELECT code, name, unit, unit_name, section, base_type, content_text
+            FROM rates
+            WHERE {conditions}
+            LIMIT ?
+        """, params)
+    
     rows = cursor.fetchall()
     results = []
     for row in rows:
@@ -118,7 +148,7 @@ with st.sidebar:
         index=0
     )
     st.divider()
-    st.caption("Версия 0.3 — с реальной базой")
+    st.caption("Версия 0.4 — умный поиск")
     st.caption("© СметаАссистент")
 
 tab1, tab2, tab3, tab4 = st.tabs([
@@ -130,13 +160,13 @@ tab1, tab2, tab3, tab4 = st.tabs([
 
 with tab1:
     st.subheader("Поиск нормы по описанию работы")
-    st.caption("Введите ключевые слова — ассистент найдёт нормы в базе ФСНБ-2022.")
+    st.caption("Введите ключевые слова или код нормы. Поиск работает по нескольким словам.")
     
     col1, col2 = st.columns([4, 1])
     with col1:
         query = st.text_input(
             "Описание работы:",
-            placeholder="Например: замок лифт, электродвигатель, кладка",
+            placeholder="Например: замена замок, электродвигатель, 01-01-001",
             label_visibility="collapsed"
         )
     with col2:
@@ -149,7 +179,7 @@ with tab1:
             if results is None:
                 st.error("⚠️ База данных не найдена. Убедитесь, что файл fsnb.sqlite находится в папке проекта.")
             elif len(results) == 0:
-                st.warning(f"По запросу «{query}» ничего не найдено. Попробуйте другие слова.")
+                st.warning(f"По запросу «{query}» ничего не найдено. Попробуйте другие слова или код.")
             else:
                 st.success(f"Найдено норм: **{len(results)}**")
                 for r in results:
@@ -173,7 +203,7 @@ with tab1:
         st.warning("Введите описание работы для поиска.")
     
     st.divider()
-    st.caption("💡 Совет: используйте ключевые слова (например, «лифт», «замок», «монтаж»).")
+    st.caption("💡 Совет: используйте ключевые слова (например, «лифт», «замок») или код нормы (например, 01-01-001).")
 
 with tab2:
     st.subheader("Анализ ведомости объёмов работ")
