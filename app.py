@@ -61,6 +61,18 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# ===== Функция для запроса к GigaChat =====
+def ask_gigachat(question: str) -> str:
+    """Отправляет запрос в GigaChat и возвращает ответ."""
+    try:
+        from gigachat import GigaChat
+        credentials = st.secrets["GIGACHAT_CREDENTIALS"]
+        with GigaChat(credentials=credentials, verify_ssl_certs=False) as client:
+            response = client.chat(question)
+            return response.choices[0].message.content
+    except Exception as e:
+        return f"⚠️ Ошибка при обращении к GigaChat: {e}"
+
 # ===== Боковая панель =====
 with st.sidebar:
     st.header("⚙️ Настройки")
@@ -88,15 +100,11 @@ with st.sidebar:
     st.divider()
     
     st.subheader("🧠 Нейросеть")
-    llm_choice = st.selectbox(
-        "Модель:",
-        ["Ollama (локально, бесплатно)", "DeepSeek API", "GigaChat API"],
-        index=0
-    )
+    st.info("Модель: **GigaChat** (Сбер)")
     
     st.divider()
     
-    st.caption("Версия 0.1 — прототип")
+    st.caption("Версия 0.2 — с GigaChat")
     st.caption("© СметаАссистент")
 
 # ===== Вкладки =====
@@ -107,10 +115,10 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "💰 Конъюнктурный анализ"
 ])
 
-# ===== Вкладка 1: Поиск норм =====
+# ===== Вкладка 1: Поиск норм с GigaChat =====
 with tab1:
     st.subheader("Поиск нормы по описанию работы")
-    st.caption("Опишите работу обычными словами — ассистент найдёт подходящие нормы.")
+    st.caption("Опишите работу обычными словами — ИИ-ассистент поможет найти подходящие нормы.")
     
     col1, col2 = st.columns([4, 1])
     with col1:
@@ -123,50 +131,29 @@ with tab1:
         search_btn = st.button("🔍 Найти", use_container_width=True)
     
     if search_btn and query:
-        with st.spinner("Анализирую описание и ищу в базе..."):
-            results = [
-                {
-                    "code": "08-02-001-01",
-                    "name": "Кладка перегородок из кирпича керамического",
-                    "unit": "100 м²",
-                    "section": "Сборник 8. Конструкции из кирпича и блоков",
-                    "match": 95
-                },
-                {
-                    "code": "08-02-001-02",
-                    "name": "Кладка перегородок из кирпича силикатного",
-                    "unit": "100 м²",
-                    "section": "Сборник 8. Конструкции из кирпича и блоков",
-                    "match": 87
-                },
-                {
-                    "code": "08-02-002-01",
-                    "name": "Кладка перегородок армированных",
-                    "unit": "100 м²",
-                    "section": "Сборник 8. Конструкции из кирпича и блоков",
-                    "match": 72
-                }
-            ]
+        with st.spinner("GigaChat анализирует описание..."):
+            prompt = f"""Ты — опытный инженер-сметчик. Пользователь описал работу:
+"{query}"
+
+Твоя задача:
+1. Определи, к какому виду работ это относится.
+2. Предложи 2-3 подходящих кода норм ГЭСН/ФЕР из базы ФСНБ-2022.
+3. Кратко объясни, почему ты выбрал именно эти нормы.
+
+Ответь структурировано: код нормы — название — краткое пояснение.
+Будь краток и конкретен."""
             
-            st.success(f"Найдено {len(results)} подходящих норм")
+            ai_response = ask_gigachat(prompt)
             
-            for r in results:
-                match_color = "#28a745" if r["match"] >= 90 else "#ffc107" if r["match"] >= 75 else "#dc3545"
-                st.markdown(f"""
-                <div class="result-card">
-                    <div class="result-code">{r["code"]}</div>
-                    <div class="result-name">{r["name"]}</div>
-                    <div class="result-detail">
-                        📏 Ед. изм.: {r["unit"]} &nbsp;|&nbsp; 📚 {r["section"]}
-                    </div>
-                    <div class="result-detail" style="margin-top:0.5rem;">
-                        Совпадение: <b style="color:{match_color}">{r["match"]}%</b>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
+            st.success("💬 Рекомендация GigaChat:")
+            st.markdown(ai_response)
             
-            st.info("💡 Проверьте состав работ и убедитесь, что норма подходит. "
-                    "Решение о применении нормы всегда за вами.")
+            st.divider()
+            st.info(
+                "💡 **Важно:** Это рекомендация нейросети, а не официальные данные. "
+                "Проверьте нормы в ФГИС ЦС и примите решение сами. "
+                "На следующем этапе мы подключим реальный поиск по базе ФСНБ-2022."
+            )
     
     elif search_btn and not query:
         st.warning("Введите описание работы для поиска.")
