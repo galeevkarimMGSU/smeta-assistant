@@ -10,7 +10,6 @@ import yaml
 import streamlit_authenticator as stauth
 from yaml.loader import SafeLoader
 
-# ===== Настройки страницы =====
 st.set_page_config(
     page_title="СметаАссистент",
     page_icon="🏗️",
@@ -29,14 +28,13 @@ authenticator = stauth.Authenticate(
     config['cookie']['expiry_days']
 )
 
-name, authentication_status, username = authenticator.login(location='main')
+authenticator.login(location='main')
 
 name = st.session_state.get('name')
 authentication_status = st.session_state.get('authentication_status')
 username = st.session_state.get('username')
 
 if authentication_status:
-    # ===== Стили =====
     st.markdown("""
     <style>
         .main-header { font-size: 2.2rem; font-weight: 700; color: #1a1a1a; margin-bottom: 0.2rem; }
