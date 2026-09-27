@@ -29,7 +29,7 @@ authenticator = stauth.Authenticate(
     config['cookie']['expiry_days']
 )
 
-name, authentication_status, username = authenticator.login('Вход в СметаАссистент', 'main')
+name, authentication_status, username = authenticator.login(location='main')
 
 if authentication_status:
     # ===== Стили =====
