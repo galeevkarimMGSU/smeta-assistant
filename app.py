@@ -69,7 +69,8 @@ def ask_gigachat(question: str) -> str:
         credentials = st.secrets["GIGACHAT_CREDENTIALS"]
         with GigaChat(
             credentials=credentials,
-            model="GigaChat",
+            scope="GIGACHAT_API_PERS",
+            model="GigaChat-2",
             verify_ssl_certs=False
         ) as client:
             response = client.chat(question)
