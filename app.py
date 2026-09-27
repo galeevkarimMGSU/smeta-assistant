@@ -1,6 +1,6 @@
 """
 СметаАссистент — ИИ-помощник сметчика.
-Поиск норм в реальной базе ФСНБ-2022 с фильтрами.
+Поиск норм в реальной базе ФСНБ-2022 с отображением состава ресурсов.
 """
 
 import streamlit as st
@@ -16,38 +16,41 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    .main-header {
-        font-size: 2.2rem;
-        font-weight: 700;
-        color: #1a1a1a;
-        margin-bottom: 0.2rem;
-    }
-    .sub-header {
-        font-size: 1rem;
-        color: #666;
-        margin-bottom: 2rem;
-    }
+    .main-header { font-size: 2.2rem; font-weight: 700; color: #1a1a1a; margin-bottom: 0.2rem; }
+    .sub-header { font-size: 1rem; color: #666; margin-bottom: 2rem; }
     .result-card {
-        background: #f8f9fa;
+        background: #ffffff;
+        border: 1px solid #e5e5e5;
         border-left: 4px solid #ff6b35;
-        padding: 1rem 1.2rem;
+        padding: 1.2rem 1.4rem;
         margin: 0.8rem 0;
         border-radius: 6px;
     }
+    .result-number { color: #999; font-size: 0.85rem; font-weight: 600; }
     .result-code {
-        font-family: monospace;
+        font-family: 'Consolas', monospace;
         font-weight: 700;
         color: #ff6b35;
-        font-size: 1.1rem;
+        font-size: 1.15rem;
+        background: #fff5f0;
+        padding: 2px 8px;
+        border-radius: 4px;
+        display: inline-block;
     }
-    .result-name {
-        font-weight: 600;
-        color: #1a1a1a;
-        margin: 0.3rem 0;
+    .result-name { font-weight: 600; color: #1a1a1a; margin: 0.5rem 0; font-size: 1.05rem; }
+    .result-meta { color: #555; font-size: 0.85rem; margin: 0.3rem 0; }
+    .result-section {
+        color: #777; font-size: 0.85rem; font-style: italic;
+        margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed #e5e5e5;
     }
-    .result-detail {
-        color: #555;
-        font-size: 0.9rem;
+    .composition-box {
+        background: #f8f9fa; border-radius: 4px; padding: 0.8rem 1rem;
+        margin-top: 0.8rem; font-size: 0.9rem; color: #333;
+        white-space: pre-line; line-height: 1.5;
+    }
+    .composition-title {
+        font-weight: 600; color: #555; font-size: 0.85rem;
+        margin-bottom: 0.3rem; text-transform: uppercase; letter-spacing: 0.5px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -69,38 +72,43 @@ def get_db_connection():
     return conn
 
 def get_all_base_types():
-    """Возвращает список всех типов баз, которые есть в БД."""
     conn = get_db_connection()
-    if conn is None:
-        return []
+    if conn is None: return []
     cursor = conn.cursor()
     cursor.execute("SELECT DISTINCT base_type FROM rates WHERE base_type IS NOT NULL ORDER BY base_type")
     return [row[0] for row in cursor.fetchall()]
 
 def get_all_units():
-    """Возвращает список всех единиц измерения, которые есть в БД."""
     conn = get_db_connection()
-    if conn is None:
-        return []
+    if conn is None: return []
     cursor = conn.cursor()
     cursor.execute("SELECT DISTINCT unit FROM rates WHERE unit IS NOT NULL ORDER BY unit")
     return [row[0] for row in cursor.fetchall()]
 
-def search_norms(query: str, base_types=None, units=None, sort_by="relevance", limit=30):
-    """Умный поиск с фильтрами."""
+def get_rate_composition(code: str, base_type: str):
+    """Получает состав ресурсов для нормы."""
     conn = get_db_connection()
-    if conn is None:
-        return None
+    if conn is None: return []
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT resource_type, resource_code, resource_name, unit, qty_per_unit
+        FROM resources
+        WHERE work_code = ? AND work_base_type = ?
+        ORDER BY resource_type, resource_code
+    """, (code, base_type))
+    return cursor.fetchall()
+
+def search_norms(query: str, base_types=None, units=None, sort_by="relevance", limit=30):
+    conn = get_db_connection()
+    if conn is None: return None
     cursor = conn.cursor()
     
     query = query.strip()
-    if not query:
-        return []
+    if not query: return []
     
     words = query.split()
     is_code_like = any(c.isdigit() for c in query) and '-' in query
     
-    # Базовые условия
     where_parts = []
     params = []
     
@@ -112,13 +120,11 @@ def search_norms(query: str, base_types=None, units=None, sort_by="relevance", l
             where_parts.append("name LIKE ?")
             params.append(f"%{w}%")
     
-    # Фильтр по типу базы
     if base_types:
         placeholders = ",".join(["?" for _ in base_types])
         where_parts.append(f"base_type IN ({placeholders})")
         params.extend(base_types)
     
-    # Фильтр по единице измерения
     if units:
         placeholders = ",".join(["?" for _ in units])
         where_parts.append(f"unit IN ({placeholders})")
@@ -126,18 +132,15 @@ def search_norms(query: str, base_types=None, units=None, sort_by="relevance", l
     
     where_clause = " AND ".join(where_parts) if where_parts else "1=1"
     
-    # Сортировка
-    if sort_by == "code":
-        order_clause = "ORDER BY code"
-    elif sort_by == "name":
-        order_clause = "ORDER BY name"
-    else:
-        order_clause = "ORDER BY code"  # по умолчанию
+    if sort_by == "code": order_clause = "ORDER BY code"
+    elif sort_by == "name": order_clause = "ORDER BY name"
+    else: order_clause = "ORDER BY code"
     
     params.append(limit)
     
     sql = f"""
-        SELECT code, name, unit, unit_name, section, base_type, content_text
+        SELECT code, name, unit, unit_name, section, base_type, content_text,
+               source_order, source_edition, effective_date
         FROM rates
         WHERE {where_clause}
         {order_clause}
@@ -150,63 +153,50 @@ def search_norms(query: str, base_types=None, units=None, sort_by="relevance", l
     for row in rows:
         results.append({
             "code": row[0], "name": row[1], "unit": row[2],
-            "unit_name": row[3], "section": row[4],
-            "base_type": row[5], "content_text": row[6]
+            "unit_name": row[3], "section": row[4], "base_type": row[5],
+            "content_text": row[6], "source_order": row[7],
+            "source_edition": row[8], "effective_date": row[9]
         })
     return results
 
 def get_total_count():
     conn = get_db_connection()
-    if conn is None:
-        return 0
+    if conn is None: return 0
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM rates")
     return cursor.fetchone()[0]
 
-# ===== Боковая панель: фильтры =====
 with st.sidebar:
     st.header("⚙️ Настройки")
-    
     st.subheader("📚 Источник данных")
     st.info("ФСНБ-2022 (образец)")
     total = get_total_count()
     st.caption(f"Всего норм: **{total}**")
     
     st.divider()
-    
     st.subheader("🎯 Фильтры поиска")
     
     all_base_types = get_all_base_types()
     selected_base_types = st.multiselect(
-        "Тип базы:",
-        options=all_base_types,
-        default=[],
+        "Тип базы:", options=all_base_types, default=[],
         help="Оставьте пустым, чтобы искать по всем типам"
     )
     
     all_units = get_all_units()
     selected_units = st.multiselect(
-        "Единица измерения:",
-        options=all_units,
-        default=[],
+        "Единица измерения:", options=all_units, default=[],
         help="Оставьте пустым, чтобы искать по всем единицам"
     )
     
     sort_by = st.selectbox(
-        "Сортировка:",
-        options=["relevance", "code", "name"],
+        "Сортировка:", options=["relevance", "code", "name"],
         format_func=lambda x: {"relevance": "По релевантности", "code": "По коду", "name": "По названию"}[x],
         index=0
     )
     
-    result_limit = st.selectbox(
-        "Максимум результатов:",
-        options=[10, 30, 50, 100],
-        index=1
-    )
+    result_limit = st.selectbox("Максимум результатов:", options=[10, 30, 50, 100], index=1)
     
     st.divider()
-    
     st.subheader("📍 Регион и период")
     region = st.selectbox(
         "Регион:",
@@ -214,22 +204,14 @@ with st.sidebar:
          "23 — Краснодарский край", "66 — Свердловская обл."],
         index=0
     )
-    quarter = st.selectbox(
-        "Квартал:",
-        ["2026 Q3", "2026 Q2", "2026 Q1", "2025 Q4"],
-        index=0
-    )
+    quarter = st.selectbox("Квартал:", ["2026 Q3", "2026 Q2", "2026 Q1", "2025 Q4"], index=0)
     
     st.divider()
-    st.caption("Версия 0.5 — с фильтрами")
+    st.caption("Версия 0.7 — с составом ресурсов")
     st.caption("© СметаАссистент")
 
-# ===== Вкладки =====
 tab1, tab2, tab3, tab4 = st.tabs([
-    "🔍 Поиск норм",
-    "📊 Анализ ВОР",
-    "⚖️ Сравнение норм",
-    "💰 Конъюнктурный анализ"
+    "🔍 Поиск норм", "📊 Анализ ВОР", "⚖️ Сравнение норм", "💰 Конъюнктурный анализ"
 ])
 
 with tab1:
@@ -259,26 +241,54 @@ with tab1:
             if results is None:
                 st.error("⚠️ База данных не найдена.")
             elif len(results) == 0:
-                st.warning(f"По запросу «{query}» ничего не найдено. Попробуйте изменить фильтры или запрос.")
+                st.warning(f"По запросу «{query}» ничего не найдено.")
             else:
                 st.success(f"Найдено норм: **{len(results)}**")
-                for r in results:
+                
+                for idx, r in enumerate(results, 1):
                     st.markdown(f"""
                     <div class="result-card">
+                        <div class="result-number">#{idx}</div>
                         <div class="result-code">{r["code"]}</div>
                         <div class="result-name">{r["name"]}</div>
-                        <div class="result-detail">
-                            📏 {r["unit"]} ({r["unit_name"]}) &nbsp;|&nbsp; 
-                            📚 {r["base_type"]}
+                        <div class="result-meta">
+                            📏 <b>{r["unit"]}</b> ({r["unit_name"]}) &nbsp;|&nbsp; 
+                            📚 <b>{r["base_type"]}</b> &nbsp;|&nbsp;
+                            📅 {r["effective_date"] or "—"}
                         </div>
-                        <div class="result-detail" style="margin-top:0.3rem;">
-                            {r["section"][:150]}...
+                        <div class="result-meta">
+                            📖 Источник: {r["source_edition"] or r["source_order"] or "—"}
+                        </div>
+                        <div class="result-section">
+                            {r["section"][:200]}...
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
-                    with st.expander("📋 Показать состав работ"):
-                        st.text(r["content_text"])
-                st.info("💡 Проверьте состав работ и убедитесь, что норма подходит.")
+                    
+                    col_a, col_b = st.columns([1, 4])
+                    with col_a:
+                        if st.button(f"📋 Копировать {r['code']}", key=f"copy_{idx}_{r['code']}"):
+                            st.toast(f"Код {r['code']} скопирован!", icon="✅")
+                    
+                    with st.expander("📋 Состав работ", expanded=False):
+                        st.markdown(f'<div class="composition-box">{r["content_text"]}</div>', unsafe_allow_html=True)
+                    
+                    # 📊 НОВЫЙ БЛОК: Расход ресурсов
+                    with st.expander("📊 Расход ресурсов", expanded=False):
+                        resources = get_rate_composition(r["code"], r["base_type"])
+                        if not resources:
+                            st.info("Для этой нормы в базе нет данных о расходе ресурсов.")
+                        else:
+                            type_names = {"labor": "👷 Трудозатраты", "machines": "🚜 Машины и механизмы", "materials": "📦 Материалы"}
+                            for res_type in ["labor", "machines", "materials"]:
+                                res_subset = [res for res in resources if res[0] == res_type]
+                                if res_subset:
+                                    st.markdown(f"**{type_names[res_type]}**")
+                                    for _, res_code, res_name, res_unit, qty in res_subset:
+                                        st.markdown(f"- `{res_code}` — {res_name} — **{qty:.4f}** {res_unit}")
+                                    st.markdown("---")
+                
+                st.info("💡 Проверьте состав работ и расход ресурсов.")
     elif search_btn and not query:
         st.warning("Введите описание работы для поиска.")
 
