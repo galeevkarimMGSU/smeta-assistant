@@ -67,7 +67,11 @@ def ask_gigachat(question: str) -> str:
     try:
         from gigachat import GigaChat
         credentials = st.secrets["GIGACHAT_CREDENTIALS"]
-        with GigaChat(credentials=credentials, verify_ssl_certs=False) as client:
+        with GigaChat(
+            credentials=credentials,
+            model="GigaChat",
+            verify_ssl_certs=False
+        ) as client:
             response = client.chat(question)
             return response.choices[0].message.content
     except Exception as e:
