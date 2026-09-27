@@ -1,6 +1,6 @@
 """
 СметаАссистент — ИИ-помощник сметчика.
-Поиск норм в реальной базе ФСНБ-2022.
+Поиск норм в реальной базе ФСНБ-2022 с фильтрами.
 """
 
 import streamlit as st
@@ -49,11 +49,6 @@ st.markdown("""
         color: #555;
         font-size: 0.9rem;
     }
-    .highlight {
-        background-color: #fff3cd;
-        padding: 0 2px;
-        border-radius: 2px;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -73,8 +68,26 @@ def get_db_connection():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     return conn
 
-def search_norms(query: str, limit: int = 30):
-    """Умный поиск: по коду, по нескольким словам, сортировка по релевантности."""
+def get_all_base_types():
+    """Возвращает список всех типов баз, которые есть в БД."""
+    conn = get_db_connection()
+    if conn is None:
+        return []
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT base_type FROM rates WHERE base_type IS NOT NULL ORDER BY base_type")
+    return [row[0] for row in cursor.fetchall()]
+
+def get_all_units():
+    """Возвращает список всех единиц измерения, которые есть в БД."""
+    conn = get_db_connection()
+    if conn is None:
+        return []
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT unit FROM rates WHERE unit IS NOT NULL ORDER BY unit")
+    return [row[0] for row in cursor.fetchall()]
+
+def search_norms(query: str, base_types=None, units=None, sort_by="relevance", limit=30):
+    """Умный поиск с фильтрами."""
     conn = get_db_connection()
     if conn is None:
         return None
@@ -84,32 +97,54 @@ def search_norms(query: str, limit: int = 30):
     if not query:
         return []
     
-    # Разбиваем на слова
     words = query.split()
-    
-    # Проверяем, похож ли запрос на код нормы (содержит цифры и дефисы)
     is_code_like = any(c.isdigit() for c in query) and '-' in query
     
-    if is_code_like:
-        # Поиск по коду
-        cursor.execute("""
-            SELECT code, name, unit, unit_name, section, base_type, content_text
-            FROM rates
-            WHERE code LIKE ?
-            LIMIT ?
-        """, (f"%{query}%", limit))
-    else:
-        # Поиск по названию: каждое слово должно встречаться
-        conditions = " AND ".join(["name LIKE ?" for _ in words])
-        params = [f"%{w}%" for w in words]
-        params.append(limit)
-        cursor.execute(f"""
-            SELECT code, name, unit, unit_name, section, base_type, content_text
-            FROM rates
-            WHERE {conditions}
-            LIMIT ?
-        """, params)
+    # Базовые условия
+    where_parts = []
+    params = []
     
+    if is_code_like:
+        where_parts.append("code LIKE ?")
+        params.append(f"%{query}%")
+    else:
+        for w in words:
+            where_parts.append("name LIKE ?")
+            params.append(f"%{w}%")
+    
+    # Фильтр по типу базы
+    if base_types:
+        placeholders = ",".join(["?" for _ in base_types])
+        where_parts.append(f"base_type IN ({placeholders})")
+        params.extend(base_types)
+    
+    # Фильтр по единице измерения
+    if units:
+        placeholders = ",".join(["?" for _ in units])
+        where_parts.append(f"unit IN ({placeholders})")
+        params.extend(units)
+    
+    where_clause = " AND ".join(where_parts) if where_parts else "1=1"
+    
+    # Сортировка
+    if sort_by == "code":
+        order_clause = "ORDER BY code"
+    elif sort_by == "name":
+        order_clause = "ORDER BY name"
+    else:
+        order_clause = "ORDER BY code"  # по умолчанию
+    
+    params.append(limit)
+    
+    sql = f"""
+        SELECT code, name, unit, unit_name, section, base_type, content_text
+        FROM rates
+        WHERE {where_clause}
+        {order_clause}
+        LIMIT ?
+    """
+    
+    cursor.execute(sql, params)
     rows = cursor.fetchall()
     results = []
     for row in rows:
@@ -128,14 +163,51 @@ def get_total_count():
     cursor.execute("SELECT COUNT(*) FROM rates")
     return cursor.fetchone()[0]
 
+# ===== Боковая панель: фильтры =====
 with st.sidebar:
     st.header("⚙️ Настройки")
-    st.subheader("Источник данных")
-    st.info("📚 База: **ФСНБ-2022** (образец)")
+    
+    st.subheader("📚 Источник данных")
+    st.info("ФСНБ-2022 (образец)")
     total = get_total_count()
-    st.caption(f"Всего норм в базе: **{total}**")
+    st.caption(f"Всего норм: **{total}**")
+    
     st.divider()
-    st.subheader("Регион и период")
+    
+    st.subheader("🎯 Фильтры поиска")
+    
+    all_base_types = get_all_base_types()
+    selected_base_types = st.multiselect(
+        "Тип базы:",
+        options=all_base_types,
+        default=[],
+        help="Оставьте пустым, чтобы искать по всем типам"
+    )
+    
+    all_units = get_all_units()
+    selected_units = st.multiselect(
+        "Единица измерения:",
+        options=all_units,
+        default=[],
+        help="Оставьте пустым, чтобы искать по всем единицам"
+    )
+    
+    sort_by = st.selectbox(
+        "Сортировка:",
+        options=["relevance", "code", "name"],
+        format_func=lambda x: {"relevance": "По релевантности", "code": "По коду", "name": "По названию"}[x],
+        index=0
+    )
+    
+    result_limit = st.selectbox(
+        "Максимум результатов:",
+        options=[10, 30, 50, 100],
+        index=1
+    )
+    
+    st.divider()
+    
+    st.subheader("📍 Регион и период")
     region = st.selectbox(
         "Регион:",
         ["77 — Москва", "78 — Санкт-Петербург", "50 — Московская обл.",
@@ -147,10 +219,12 @@ with st.sidebar:
         ["2026 Q3", "2026 Q2", "2026 Q1", "2025 Q4"],
         index=0
     )
+    
     st.divider()
-    st.caption("Версия 0.4 — умный поиск")
+    st.caption("Версия 0.5 — с фильтрами")
     st.caption("© СметаАссистент")
 
+# ===== Вкладки =====
 tab1, tab2, tab3, tab4 = st.tabs([
     "🔍 Поиск норм",
     "📊 Анализ ВОР",
@@ -160,7 +234,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
 
 with tab1:
     st.subheader("Поиск нормы по описанию работы")
-    st.caption("Введите ключевые слова или код нормы. Поиск работает по нескольким словам.")
+    st.caption("Введите ключевые слова или код. Используйте фильтры в боковой панели для уточнения.")
     
     col1, col2 = st.columns([4, 1])
     with col1:
@@ -174,12 +248,18 @@ with tab1:
     
     if search_btn and query:
         with st.spinner("Ищу в базе ФСНБ..."):
-            results = search_norms(query)
+            results = search_norms(
+                query,
+                base_types=selected_base_types if selected_base_types else None,
+                units=selected_units if selected_units else None,
+                sort_by=sort_by,
+                limit=result_limit
+            )
             
             if results is None:
-                st.error("⚠️ База данных не найдена. Убедитесь, что файл fsnb.sqlite находится в папке проекта.")
+                st.error("⚠️ База данных не найдена.")
             elif len(results) == 0:
-                st.warning(f"По запросу «{query}» ничего не найдено. Попробуйте другие слова или код.")
+                st.warning(f"По запросу «{query}» ничего не найдено. Попробуйте изменить фильтры или запрос.")
             else:
                 st.success(f"Найдено норм: **{len(results)}**")
                 for r in results:
@@ -188,7 +268,7 @@ with tab1:
                         <div class="result-code">{r["code"]}</div>
                         <div class="result-name">{r["name"]}</div>
                         <div class="result-detail">
-                            📏 Ед. изм.: {r["unit"]} ({r["unit_name"]}) &nbsp;|&nbsp; 
+                            📏 {r["unit"]} ({r["unit_name"]}) &nbsp;|&nbsp; 
                             📚 {r["base_type"]}
                         </div>
                         <div class="result-detail" style="margin-top:0.3rem;">
@@ -201,9 +281,6 @@ with tab1:
                 st.info("💡 Проверьте состав работ и убедитесь, что норма подходит.")
     elif search_btn and not query:
         st.warning("Введите описание работы для поиска.")
-    
-    st.divider()
-    st.caption("💡 Совет: используйте ключевые слова (например, «лифт», «замок») или код нормы (например, 01-01-001).")
 
 with tab2:
     st.subheader("Анализ ведомости объёмов работ")
