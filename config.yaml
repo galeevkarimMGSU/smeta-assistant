@@ -1,0 +1,13 @@
+cookie:
+  expiry_days: 30
+  key: some_random_key_here_change_me
+  name: smeta_assistant_cookie
+credentials:
+  usernames:
+    uchenik1:
+      email: uchenik1@example.com
+      first_name: Иван
+      last_name: Иванов
+      password: test123
+      roles:
+        - viewer
