@@ -1,6 +1,6 @@
 """
 СметаАссистент — ИИ-помощник сметчика.
-С аутентификацией пользователей.
+С аутентификацией и экспортом в Excel.
 """
 
 import streamlit as st
@@ -156,6 +156,58 @@ if authentication_status:
             })
         return results
 
+    def export_to_excel(results):
+        """Преобразует результаты поиска в Excel-файл."""
+        import io
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Нормы ФСНБ-2022"
+
+        headers = ["№", "Код нормы", "Наименование", "Ед. изм.", "Тип базы", "Раздел", "Состав работ"]
+        ws.append(headers)
+
+        header_font = Font(bold=True, color="FFFFFF", size=11)
+        header_fill = PatternFill(start_color="FF6B35", end_color="FF6B35", fill_type="solid")
+        header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        thin_border = Border(
+            left=Side(style='thin'), right=Side(style='thin'),
+            top=Side(style='thin'), bottom=Side(style='thin')
+        )
+
+        for col_idx, _ in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_idx)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_align
+            cell.border = thin_border
+
+        for idx, r in enumerate(results, 1):
+            ws.append([
+                idx,
+                r["code"],
+                r["name"],
+                f"{r['unit']} ({r['unit_name']})",
+                r["base_type"],
+                r["section"],
+                r["content_text"]
+            ])
+
+        ws.column_dimensions['A'].width = 5
+        ws.column_dimensions['B'].width = 18
+        ws.column_dimensions['C'].width = 50
+        ws.column_dimensions['D'].width = 15
+        ws.column_dimensions['E'].width = 12
+        ws.column_dimensions['F'].width = 40
+        ws.column_dimensions['G'].width = 60
+
+        buffer = io.BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+        return buffer
+
     def get_total_count():
         conn = get_db_connection()
         if conn is None: return 0
@@ -200,7 +252,7 @@ if authentication_status:
         )
         quarter = st.selectbox("Квартал:", ["2026 Q3", "2026 Q2", "2026 Q1", "2025 Q4"], index=0)
         st.divider()
-        st.caption("Версия 0.8 — с аутентификацией")
+        st.caption("Версия 0.9 — экспорт в Excel")
         st.caption("© СметаАссистент")
 
     tab1, tab2, tab3, tab4 = st.tabs([
@@ -233,7 +285,19 @@ if authentication_status:
                 elif len(results) == 0:
                     st.warning(f"По запросу «{query}» ничего не найдено.")
                 else:
-                    st.success(f"Найдено норм: **{len(results)}**")
+                    col_info, col_export = st.columns([3, 1])
+                    with col_info:
+                        st.success(f"Найдено норм: **{len(results)}**")
+                    with col_export:
+                        excel_buffer = export_to_excel(results)
+                        st.download_button(
+                            label="📥 Скачать в Excel",
+                            data=excel_buffer,
+                            file_name=f"fsnb_{query.replace(' ', '_')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+
                     for idx, r in enumerate(results, 1):
                         st.markdown(f"""
                         <div class="result-card">
