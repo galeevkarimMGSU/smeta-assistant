@@ -71,20 +71,19 @@ if authentication_status:
         unsafe_allow_html=True
     )
 
-    # ===== Автоматическая распаковка базы из ZIP =====
+    # ===== Автоматическая распаковка базы из ZIP (всегда перезаписываем) =====
     DB_PATH = "fsnb.sqlite"
 
-    if not os.path.exists(DB_PATH):
-        import zipfile
-        zip_path = "fsnb.zip"
-        if os.path.exists(zip_path):
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                for file_name in zip_ref.namelist():
-                    if file_name.endswith('.sqlite'):
-                        with zip_ref.open(file_name) as source:
-                            with open(DB_PATH, 'wb') as target:
-                                target.write(source.read())
-                        break
+    import zipfile
+    zip_path = "fsnb.zip"
+    if os.path.exists(zip_path):
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            for file_name in zip_ref.namelist():
+                if file_name.endswith('.sqlite'):
+                    with zip_ref.open(file_name) as source:
+                        with open(DB_PATH, 'wb') as target:
+                            target.write(source.read())
+                    break
 
     @st.cache_resource
     def get_db_connection():
