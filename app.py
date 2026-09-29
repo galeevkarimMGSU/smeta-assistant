@@ -1,6 +1,6 @@
 """
 СметаАссистент — ИИ-помощник сметчика.
-С аутентификацией и экспортом в Excel.
+С аутентификацией, экспортом в Excel и полной базой ФСНБ-2022.
 """
 
 import streamlit as st
@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 # ===== Аутентификация =====
-with open('config.yaml') as file:
+with open('config.yaml', encoding='utf-8') as file:
     config = yaml.load(file, Loader=SafeLoader)
 
 authenticator = stauth.Authenticate(
@@ -71,7 +71,20 @@ if authentication_status:
         unsafe_allow_html=True
     )
 
+    # ===== Автоматическая распаковка базы из ZIP =====
     DB_PATH = "fsnb.sqlite"
+
+    if not os.path.exists(DB_PATH):
+        import zipfile
+        zip_path = "fsnb.zip"
+        if os.path.exists(zip_path):
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                for file_name in zip_ref.namelist():
+                    if file_name.endswith('.sqlite'):
+                        with zip_ref.open(file_name) as source:
+                            with open(DB_PATH, 'wb') as target:
+                                target.write(source.read())
+                        break
 
     @st.cache_resource
     def get_db_connection():
@@ -157,7 +170,6 @@ if authentication_status:
         return results
 
     def export_to_excel(results):
-        """Преобразует результаты поиска в Excel-файл."""
         import io
         from openpyxl import Workbook
         from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
@@ -221,7 +233,7 @@ if authentication_status:
         st.divider()
         st.header("⚙️ Настройки")
         st.subheader("📚 Источник данных")
-        st.info("ФСНБ-2022 (образец)")
+        st.info("ФСНБ-2022 (полная база)")
         total = get_total_count()
         st.caption(f"Всего норм: **{total}**")
         st.divider()
@@ -252,7 +264,7 @@ if authentication_status:
         )
         quarter = st.selectbox("Квартал:", ["2026 Q3", "2026 Q2", "2026 Q1", "2025 Q4"], index=0)
         st.divider()
-        st.caption("Версия 0.9 — экспорт в Excel")
+        st.caption("Версия 1.0 — полная база ФСНБ")
         st.caption("© СметаАссистент")
 
     tab1, tab2, tab3, tab4 = st.tabs([
@@ -266,7 +278,7 @@ if authentication_status:
         with col1:
             query = st.text_input(
                 "Описание работы:",
-                placeholder="Например: замена замок, электродвигатель, 01-01-001",
+                placeholder="Например: кирпич, бетон, монтаж, 01-01-001",
                 label_visibility="collapsed"
             )
         with col2:
