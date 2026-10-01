@@ -1,12 +1,13 @@
 """
 СметаАссистент — ИИ-помощник сметчика.
-Поиск норм в полной базе ФСНБ-2022.
+Полная база ФСНБ-2022 + FTS5-поиск с bm25-ранжированием.
 """
 
 import streamlit as st
 import sqlite3
 import os
 import zipfile
+import re
 
 st.set_page_config(
     page_title="СметаАссистент",
@@ -24,7 +25,6 @@ st.markdown("""
         border-left: 4px solid #ff6b35; padding: 1.2rem 1.4rem;
         margin: 0.8rem 0; border-radius: 6px;
     }
-    .result-number { color: #999; font-size: 0.85rem; font-weight: 600; }
     .result-code {
         font-family: 'Consolas', monospace; font-weight: 700;
         color: #ff6b35; font-size: 1.15rem; background: #fff5f0;
@@ -32,14 +32,14 @@ st.markdown("""
     }
     .result-name { font-weight: 600; color: #1a1a1a; margin: 0.5rem 0; font-size: 1.05rem; }
     .result-meta { color: #555; font-size: 0.85rem; margin: 0.3rem 0; }
-    .result-section {
-        color: #777; font-size: 0.85rem; font-style: italic;
-        margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed #e5e5e5;
-    }
     .composition-box {
         background: #f8f9fa; border-radius: 4px; padding: 0.8rem 1rem;
         margin-top: 0.8rem; font-size: 0.9rem; color: #333;
         white-space: pre-line; line-height: 1.5;
+    }
+    .detect-box {
+        background: #e8f4f8; border-left: 4px solid #2196f3;
+        padding: 1rem; border-radius: 6px; margin: 1rem 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -51,7 +51,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# ===== Автоматическая распаковка базы из ZIP =====
+# ===== Автоматическая распаковка базы =====
 DB_PATH = "fsnb.sqlite"
 zip_path = "fsnb.zip"
 
@@ -91,13 +91,205 @@ def get_rate_composition(code: str, base_type: str):
     cursor = conn.cursor()
     cursor.execute("""
         SELECT resource_type, resource_code, resource_name, unit, qty_per_unit
-        FROM resources
-        WHERE work_code = ? AND work_base_type = ?
+        FROM resources WHERE work_code = ? AND work_base_type = ?
         ORDER BY resource_type, resource_code
     """, (code, base_type))
     return cursor.fetchall()
 
+def clean_html(text):
+    if not text: return ""
+    text = re.sub(r'<[^>]+>', ' ', str(text))
+    text = text.replace('&nbsp;', ' ').replace('&amp;', '&')
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+# ===== СТОП-СЛОВА =====
+STOP_WORDS = {
+    'с', 'из', 'на', 'по', 'до', 'в', 'и', 'или', 'для', 'при', 'к', 'от',
+    'о', 'об', 'за', 'под', 'над', 'у', 'без', 'через', 'между', 'а', 'но',
+    'же', 'бы', 'ли', 'то', 'как', 'так', 'что', 'это', 'её', 'его', 'их',
+    'т.д', 'т.п', 'т.е', 'прим'
+}
+
+# ===== ОБЩИЕ ГЛАГОЛЫ (только для fallback-поиска) =====
+COMMON_VERBS = {
+    'демонтаж', 'монтаж', 'разборка', 'устройство', 'установка',
+    'прокладка', 'снятие', 'кладка', 'заделка', 'ремонт',
+    'разработка', 'погрузка', 'перевозка', 'нанесение',
+    'армирование', 'пробивка', 'сверление', 'восстановление',
+    'антисептирование', 'штукатурка', 'огрунтовка', 'отбивка',
+    'затаривание', 'изготовление', 'сборка', 'разбор', 'укладка',
+    'заливка', 'укрепление', 'облицовка', 'утепление', 'изоляция',
+    'окраска', 'покраска', 'оклейка', 'обмазка', 'заполнение',
+    'перемещение', 'заготовка', 'сбор', 'установление',
+    'прочие', 'прочее', 'работы', 'работа'
+}
+
+def extract_keywords(text, max_keywords=12, remove_common=False):
+    """Извлекает значимые слова из текста."""
+    text = clean_html(text).lower()
+    text = re.sub(r'[^\w\s\-]', ' ', text)
+    words = text.split()
+    result = []
+    for w in words:
+        if w in STOP_WORDS: continue
+        if len(w) < 3: continue
+        if remove_common and w in COMMON_VERBS: continue
+        if w not in result:
+            result.append(w)
+    return result[:max_keywords]
+
+def stem(word):
+    """Грубая основа слова (убирает последние 1-2 символа)."""
+    if len(word) <= 4: return word
+    return word[:max(len(word) - 2, 4)]
+
+def escape_fts(word):
+    """Убирает спецсимволы FTS5."""
+    return re.sub(r'["()*:^\-]', '', word)
+
+def is_material(work_name, unit_val):
+    """Определяет, является ли строка материалом."""
+    work_lower = work_name.lower()
+
+    action_verbs = [
+        'разборка', 'демонтаж', 'монтаж', 'устройство', 'установка',
+        'прокладка', 'снятие', 'кладка', 'заделка', 'ремонт',
+        'разработка', 'погрузка', 'перевозка', 'нанесение',
+        'армирование', 'пробивка', 'сверление', 'восстановление',
+        'антисептирование', 'штукатурка', 'огрунтовка', 'отбивка',
+        'затаривание', 'изготовление', 'сборка', 'разбор', 'укладка',
+        'заливка', 'укрепление', 'облицовка', 'утепление', 'изоляция',
+        'окраска', 'покраска', 'оклейка', 'обмазка', 'заполнение',
+        'перемещение', 'заготовка', 'сбор', 'установление'
+    ]
+    if any(v in work_lower for v in action_verbs):
+        return False
+
+    material_keywords = [
+        'лист', 'сетка', 'смесь', 'грунтовка', 'сверло',
+        'краска', 'лак', 'эмаль', 'клей', 'мастика', 'герметик', 'пена',
+        'профиль', 'уголок', 'труба', 'кабель', 'провод', 'арматура',
+        'бетон', 'раствор', 'цемент', 'песок', 'щебень', 'кирпич',
+        'блок', 'плита', 'панель', 'утеплитель',
+        'мембрана', 'плёнка', 'пленка', 'саморез', 'дюбель', 'анкер',
+        'болт', 'гайка', 'шайба', 'скоба', 'хомут', 'крепёж', 'крепеж',
+        'кронштейн', 'подоконник', 'отлив', 'наличник', 'плинтус',
+        'плитка', 'керамогранит', 'ламинат', 'линолеум', 'паркет',
+        'обои', 'шпаклёвка', 'шпаклевка', 'электрод', 'проволока',
+        'лента', 'скотч', 'гипсокартон', 'гкл', 'гвл', 'фанера',
+        'герб', 'табло', 'светильник', 'лампа', 'розетка', 'выключатель'
+    ]
+    if any(mk in work_lower for mk in material_keywords):
+        return True
+    return False
+
+def build_fts_query(stems, operator="AND"):
+    """Строит FTS5-запрос из стемов."""
+    parts = [f'"{s}"*' for s in stems if s]
+    if not parts:
+        return None
+    return f" {operator} ".join(parts)
+
+def format_rows(rows):
+    return [{
+        "code": r[0], "name": r[1], "unit": r[2], "unit_name": r[3],
+        "section": r[4], "base_type": r[5], "content_text": r[6],
+        "source_order": r[7], "source_edition": r[8], "effective_date": r[9]
+    } for r in rows]
+
+def search_norms_fts(query: str, unit_val: str = None, limit=3):
+    """
+    Умный FTS5-поиск с bm25-ранжированием.
+    Стратегия:
+      1. AND всех значимых стемов — максимальная точность.
+      2. AND топ-3 значимых стемов.
+      3. AND топ-2 значимых стемов.
+      4. AND всех стемов (с общими глаголами).
+      5. OR всех стемов (fallback, но с bm25).
+    """
+    all_keywords = extract_keywords(query, max_keywords=15, remove_common=False)
+    if not all_keywords:
+        return []
+
+    # Все стемы
+    stems_all = []
+    for kw in all_keywords:
+        s = escape_fts(stem(kw))
+        if len(s) >= 3 and s not in stems_all:
+            stems_all.append(s)
+
+    # Стемы без общих глаголов
+    specific_keywords = extract_keywords(query, max_keywords=15, remove_common=True)
+    stems_specific = []
+    for kw in specific_keywords:
+        s = escape_fts(stem(kw))
+        if len(s) >= 3 and s not in stems_specific:
+            stems_specific.append(s)
+
+    if not stems_all and not stems_specific:
+        return []
+
+    conn = get_db_connection()
+    if conn is None:
+        return []
+    cursor = conn.cursor()
+
+    # Стратегии по убыванию точности
+    strategies = []
+    if len(stems_specific) >= 2:
+        strategies.append(build_fts_query(stems_specific, "AND"))
+    if len(stems_specific) >= 3:
+        strategies.append(build_fts_query(stems_specific[:3], "AND"))
+    if len(stems_specific) >= 2:
+        strategies.append(build_fts_query(stems_specific[:2], "AND"))
+    if len(stems_all) >= 2:
+        strategies.append(build_fts_query(stems_all, "AND"))
+    if stems_specific:
+        strategies.append(build_fts_query(stems_specific, "OR"))
+    if stems_all:
+        strategies.append(build_fts_query(stems_all, "OR"))
+
+    for fts_q in strategies:
+        if not fts_q:
+            continue
+        try:
+            cursor.execute("""
+                SELECT r.code, r.name, r.unit, r.unit_name, r.section, r.base_type,
+                       r.content_text, r.source_order, r.source_edition, r.effective_date
+                FROM rates_fts
+                JOIN rates r ON r.rowid = rates_fts.rowid
+                WHERE rates_fts MATCH ?
+                ORDER BY bm25(rates_fts)
+                LIMIT 100
+            """, (fts_q,))
+            rows = cursor.fetchall()
+            if rows:
+                # Python-переранжирование
+                scored = []
+                for row in rows:
+                    name_low = row[1].lower()
+                    matched = sum(1 for s in stems_all if s in name_low)
+
+                    unit_bonus = 0
+                    if unit_val:
+                        uv = unit_val.lower().strip()
+                        row_unit = (row[2] or "").lower()
+                        if uv and row_unit and (uv in row_unit or row_unit in uv):
+                            unit_bonus = 20
+
+                    score = matched * 10 + unit_bonus
+                    scored.append((score, row))
+
+                scored.sort(key=lambda x: -x[0])
+                return format_rows([r for _, r in scored[:limit]])
+        except Exception:
+            continue
+
+    return []
+
 def search_norms(query: str, base_types=None, units=None, sort_by="relevance", limit=30):
+    """Простой поиск (для вкладки «Поиск норм»)."""
     conn = get_db_connection()
     if conn is None: return None
     cursor = conn.cursor()
@@ -130,61 +322,28 @@ def search_norms(query: str, base_types=None, units=None, sort_by="relevance", l
     sql = f"""
         SELECT code, name, unit, unit_name, section, base_type, content_text,
                source_order, source_edition, effective_date
-        FROM rates
-        WHERE {where_clause}
-        {order_clause}
-        LIMIT ?
+        FROM rates WHERE {where_clause} {order_clause} LIMIT ?
     """
     cursor.execute(sql, params)
-    rows = cursor.fetchall()
-    results = []
-    for row in rows:
-        results.append({
-            "code": row[0], "name": row[1], "unit": row[2],
-            "unit_name": row[3], "section": row[4], "base_type": row[5],
-            "content_text": row[6], "source_order": row[7],
-            "source_edition": row[8], "effective_date": row[9]
-        })
-    return results
+    return format_rows(cursor.fetchall())
 
 def export_to_excel(results):
     import io
     from openpyxl import Workbook
-    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-
+    from openpyxl.styles import Font, Alignment, PatternFill
     wb = Workbook()
     ws = wb.active
     ws.title = "Нормы ФСНБ-2022"
-
     headers = ["№", "Код нормы", "Наименование", "Ед. изм.", "Тип базы", "Раздел", "Состав работ"]
     ws.append(headers)
-
     header_font = Font(bold=True, color="FFFFFF", size=11)
     header_fill = PatternFill(start_color="FF6B35", end_color="FF6B35", fill_type="solid")
-    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    thin_border = Border(
-        left=Side(style='thin'), right=Side(style='thin'),
-        top=Side(style='thin'), bottom=Side(style='thin')
-    )
-
-    for col_idx, _ in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col_idx)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = header_align
-        cell.border = thin_border
-
+    for c, _ in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=c)
+        cell.font = header_font; cell.fill = header_fill
     for idx, r in enumerate(results, 1):
-        ws.append([
-            idx,
-            r["code"],
-            r["name"],
-            f"{r['unit']} ({r['unit_name']})",
-            r["base_type"],
-            r["section"],
-            r["content_text"]
-        ])
-
+        ws.append([idx, r["code"], r["name"], f"{r['unit']} ({r['unit_name']})",
+                   r["base_type"], r["section"], r["content_text"]])
     ws.column_dimensions['A'].width = 5
     ws.column_dimensions['B'].width = 18
     ws.column_dimensions['C'].width = 50
@@ -192,11 +351,24 @@ def export_to_excel(results):
     ws.column_dimensions['E'].width = 12
     ws.column_dimensions['F'].width = 40
     ws.column_dimensions['G'].width = 60
+    buf = io.BytesIO(); wb.save(buf); buf.seek(0); return buf
 
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    buffer.seek(0)
-    return buffer
+def export_vor_to_excel(results_df):
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill
+    from openpyxl.utils import get_column_letter
+    wb = Workbook(); ws = wb.active; ws.title = "ВОР с нормами"
+    headers = list(results_df.columns); ws.append(headers)
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    header_fill = PatternFill(start_color="FF6B35", end_color="FF6B35", fill_type="solid")
+    for c, _ in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=c)
+        cell.font = header_font; cell.fill = header_fill
+    for _, row in results_df.iterrows(): ws.append(list(row))
+    for c in range(1, len(headers) + 1):
+        ws.column_dimensions[get_column_letter(c)].width = 30
+    buf = io.BytesIO(); wb.save(buf); buf.seek(0); return buf
 
 def get_total_count():
     conn = get_db_connection()
@@ -205,182 +377,224 @@ def get_total_count():
     cursor.execute("SELECT COUNT(*) FROM rates")
     return cursor.fetchone()[0]
 
+def detect_vor_structure(file_buffer):
+    import pandas as pd
+    file_buffer.seek(0)
+    df_raw = pd.read_excel(file_buffer, header=None, nrows=30)
+    header_row = name_col = unit_col = qty_col = None
+    name_kw = ["наименование", "работа", "описание", "вид работ"]
+    unit_kw = ["ед", "единица", "изм"]
+    qty_kw = ["кол", "количество", "объём", "объем", "кол-во"]
+    for i, row in df_raw.iterrows():
+        rv = [str(v).lower().strip() if pd.notna(v) else "" for v in row]
+        has_n = any(any(k in v for k in name_kw) for v in rv)
+        has_u = any(any(k in v for k in unit_kw) for v in rv)
+        has_q = any(any(k in v for k in qty_kw) for v in rv)
+        if has_n and (has_u or has_q):
+            header_row = i
+            for j, v in enumerate(rv):
+                if any(k in v for k in name_kw) and name_col is None: name_col = j
+                if any(k in v for k in unit_kw) and unit_col is None: unit_col = j
+                if any(k in v for k in qty_kw) and qty_col is None: qty_col = j
+            break
+    return {
+        "header_row": header_row if header_row is not None else 0,
+        "name_col": name_col if name_col is not None else 1,
+        "unit_col": unit_col if unit_col is not None else 2,
+        "qty_col": qty_col if qty_col is not None else 3,
+        "found": header_row is not None
+    }
+
+# ===== БОКОВАЯ ПАНЕЛЬ =====
 with st.sidebar:
     st.header("⚙️ Настройки")
     st.subheader("📚 Источник данных")
     st.info("ФСНБ-2022 (полная база)")
-    total = get_total_count()
-    st.caption(f"Всего норм: **{total}**")
+    st.caption(f"Всего норм: **{get_total_count()}**")
     st.divider()
     st.subheader("🎯 Фильтры поиска")
     all_base_types = get_all_base_types()
-    selected_base_types = st.multiselect(
-        "Тип базы:", options=all_base_types, default=[],
-        help="Оставьте пустым, чтобы искать по всем типам"
-    )
+    selected_base_types = st.multiselect("Тип базы:", options=all_base_types, default=[])
     all_units = get_all_units()
-    selected_units = st.multiselect(
-        "Единица измерения:", options=all_units, default=[],
-        help="Оставьте пустым, чтобы искать по всем единицам"
-    )
-    sort_by = st.selectbox(
-        "Сортировка:", options=["relevance", "code", "name"],
-        format_func=lambda x: {"relevance": "По релевантности", "code": "По коду", "name": "По названию"}[x],
-        index=0
-    )
+    selected_units = st.multiselect("Единица измерения:", options=all_units, default=[])
+    sort_by = st.selectbox("Сортировка:", options=["relevance", "code", "name"],
+        format_func=lambda x: {"relevance": "По релевантности", "code": "По коду", "name": "По названию"}[x], index=0)
     result_limit = st.selectbox("Максимум результатов:", options=[10, 30, 50, 100], index=1)
     st.divider()
-    st.subheader("📍 Регион и период")
-    region = st.selectbox(
-        "Регион:",
-        ["77 — Москва", "78 — Санкт-Петербург", "50 — Московская обл.",
-         "23 — Краснодарский край", "66 — Свердловская обл."],
-        index=0
-    )
-    quarter = st.selectbox("Квартал:", ["2026 Q3", "2026 Q2", "2026 Q1", "2025 Q4"], index=0)
-    st.divider()
-    st.caption("Версия 1.0 — полная база ФСНБ")
+    st.caption("Версия 1.5 — bm25-поиск")
     st.caption("© СметаАссистент")
 
 tab1, tab2, tab3, tab4 = st.tabs([
     "🔍 Поиск норм", "📊 Анализ ВОР", "⚖️ Сравнение норм", "💰 Конъюнктурный анализ"
 ])
 
+# ===== ВКЛАДКА 1 =====
 with tab1:
     st.subheader("Поиск нормы по описанию работы")
-    st.caption("Введите ключевые слова или код. Используйте фильтры в боковой панели для уточнения.")
     col1, col2 = st.columns([4, 1])
     with col1:
-        query = st.text_input(
-            "Описание работы:",
-            placeholder="Например: кирпич, бетон, монтаж, 01-01-001",
-            label_visibility="collapsed"
-        )
+        query = st.text_input("Описание работы:", placeholder="Например: светильник, штукатурка", label_visibility="collapsed")
     with col2:
         search_btn = st.button("🔍 Найти", use_container_width=True)
+
     if search_btn and query:
         with st.spinner("Ищу в базе ФСНБ..."):
-            results = search_norms(
-                query,
-                base_types=selected_base_types if selected_base_types else None,
-                units=selected_units if selected_units else None,
-                sort_by=sort_by,
-                limit=result_limit
-            )
+            results = search_norms(query, base_types=selected_base_types if selected_base_types else None,
+                units=selected_units if selected_units else None, sort_by=sort_by, limit=result_limit)
             if results is None:
                 st.error("⚠️ База данных не найдена.")
             elif len(results) == 0:
                 st.warning(f"По запросу «{query}» ничего не найдено.")
             else:
                 col_info, col_export = st.columns([3, 1])
-                with col_info:
-                    st.success(f"Найдено норм: **{len(results)}**")
+                with col_info: st.success(f"Найдено: **{len(results)}**")
                 with col_export:
-                    excel_buffer = export_to_excel(results)
-                    st.download_button(
-                        label="📥 Скачать в Excel",
-                        data=excel_buffer,
-                        file_name=f"fsnb_{query.replace(' ', '_')}.xlsx",
+                    st.download_button("📥 Excel", data=export_to_excel(results),
+                        file_name=f"fsnb_{query.replace(' ','_')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
-
-                for idx, r in enumerate(results, 1):
+                        use_container_width=True)
+                for r in results:
                     st.markdown(f"""
                     <div class="result-card">
-                        <div class="result-number">#{idx}</div>
                         <div class="result-code">{r["code"]}</div>
                         <div class="result-name">{r["name"]}</div>
-                        <div class="result-meta">
-                            📏 <b>{r["unit"]}</b> ({r["unit_name"]}) &nbsp;|&nbsp; 
-                            📚 <b>{r["base_type"]}</b> &nbsp;|&nbsp;
-                            📅 {r["effective_date"] or "—"}
-                        </div>
-                        <div class="result-meta">
-                            📖 Источник: {r["source_edition"] or r["source_order"] or "—"}
-                        </div>
-                        <div class="result-section">
-                            {r["section"][:200]}...
-                        </div>
+                        <div class="result-meta">📏 <b>{r["unit"]}</b> ({r["unit_name"]}) | 📚 {r["base_type"]}</div>
                     </div>
                     """, unsafe_allow_html=True)
-                    col_a, col_b = st.columns([1, 4])
-                    with col_a:
-                        if st.button(f"📋 Копировать {r['code']}", key=f"copy_{idx}_{r['code']}"):
-                            st.toast(f"Код {r['code']} скопирован!", icon="✅")
-                    with st.expander("📋 Состав работ", expanded=False):
-                        st.markdown(f'<div class="composition-box">{r["content_text"]}</div>', unsafe_allow_html=True)
-                    with st.expander("📊 Расход ресурсов", expanded=False):
-                        resources = get_rate_composition(r["code"], r["base_type"])
-                        if not resources:
-                            st.info("Для этой нормы в базе нет данных о расходе ресурсов.")
-                        else:
-                            type_names = {"labor": "👷 Трудозатраты", "machines": "🚜 Машины и механизмы", "materials": "📦 Материалы"}
-                            for res_type in ["labor", "machines", "materials"]:
-                                res_subset = [res for res in resources if res[0] == res_type]
-                                if res_subset:
-                                    st.markdown(f"**{type_names[res_type]}**")
-                                    for _, res_code, res_name, res_unit, qty in res_subset:
-                                        st.markdown(f"- `{res_code}` — {res_name} — **{qty:.4f}** {res_unit}")
-                                    st.markdown("---")
-                st.info("💡 Проверьте состав работ и расход ресурсов.")
-    elif search_btn and not query:
-        st.warning("Введите описание работы для поиска.")
 
+# ===== ВКЛАДКА 2: ВОР =====
 with tab2:
-    st.subheader("Анализ ведомости объёмов работ")
-    st.caption("Загрузите ВОР в формате Excel — ассистент разберёт позиции.")
-    uploaded_file = st.file_uploader("Загрузите файл ВОР (.xlsx):", type=["xlsx", "xls"])
-    if uploaded_file:
-        try:
-            import pandas as pd
-            df = pd.read_excel(uploaded_file)
-            st.success(f"Файл загружен: {len(df)} позиций")
-            st.dataframe(df.head(10), use_container_width=True)
-        except Exception as e:
-            st.error(f"Ошибка при чтении файла: {e}")
-    else:
-        st.info("📁 Загрузите файл, чтобы начать анализ.")
+    st.subheader("Анализ ВОР")
+    st.caption("Загрузите ВОР — ассистент подберёт нормы через FTS5+bm25.")
 
+    uploaded_file = st.file_uploader("Файл ВОР (.xlsx, .xls):", type=["xlsx", "xls"])
+
+    if uploaded_file:
+        import pandas as pd
+        try:
+            detected = detect_vor_structure(uploaded_file)
+            if detected["found"]:
+                st.markdown(f"""
+                <div class="detect-box">
+                    ✅ Шапка: строка <b>{detected["header_row"] + 1}</b> |
+                    📝 Наименование: <b>{chr(65 + detected["name_col"])}</b> |
+                    📏 Ед. изм.: <b>{chr(65 + detected["unit_col"])}</b> |
+                    🔢 Объём: <b>{chr(65 + detected["qty_col"])}</b>
+                </div>
+                """, unsafe_allow_html=True)
+
+            with st.expander("🔧 Настройки чтения", expanded=not detected["found"]):
+                colA, colB = st.columns(2)
+                with colA:
+                    hr = st.number_input("Строка с шапкой:", 0, 50, detected["header_row"], 1)
+                with colB:
+                    nc = st.number_input("Столбец наименования:", 0, 30, detected["name_col"], 1)
+                colC, colD = st.columns(2)
+                with colC:
+                    uc = st.number_input("Столбец ед. изм.:", 0, 30, detected["unit_col"], 1)
+                with colD:
+                    qc = st.number_input("Столбец объёма:", 0, 30, detected["qty_col"], 1)
+                include_sub = st.checkbox("Включать подпункты (7.1, 8.1)", value=False)
+
+            uploaded_file.seek(0)
+            df = pd.read_excel(uploaded_file, header=hr)
+            st.dataframe(df.head(10), use_container_width=True)
+
+            if st.button("🤖 Подобрать нормы", use_container_width=True):
+                results_data = []
+                counter = 0
+                progress = st.progress(0)
+
+                for idx, row in df.iterrows():
+                    try:
+                        work_name = clean_html(row.iloc[nc]) if pd.notna(row.iloc[nc]) else ""
+                    except: continue
+                    if not work_name or len(work_name) < 5: continue
+                    if work_name.lower().startswith(("раздел", "итого", "всего", "№ п/п", "п/п")): continue
+                    if work_name.replace(".", "").replace(",", "").replace(" ", "").isdigit(): continue
+
+                    row_num = ""
+                    try: row_num = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ""
+                    except: pass
+
+                    is_sub = "." in row_num and row_num.split(".")[0].isdigit()
+                    if is_sub and not include_sub: continue
+
+                    counter += 1
+                    try: unit_val = str(row.iloc[uc]).strip() if pd.notna(row.iloc[uc]) else "—"
+                    except: unit_val = "—"
+                    try: qty_val = str(row.iloc[qc]).strip() if pd.notna(row.iloc[qc]) else "—"
+                    except: qty_val = "—"
+
+                    res = {"№": counter, "Работа из ВОР": work_name[:200],
+                           "Ед. изм. (ВОР)": unit_val, "Объём": qty_val,
+                           "Код нормы": "", "Наименование нормы": "", "Тип базы": "", "Код вручную": ""}
+
+                    if is_material(work_name, unit_val):
+                        res["Код нормы"] = "📦 Материал"
+                        res["Наименование нормы"] = "Норма не требуется"
+                        res["Тип базы"] = "—"
+                    else:
+                        matches = search_norms_fts(work_name, unit_val=unit_val, limit=3)
+                        if matches:
+                            m = matches[0]
+                            res["Код нормы"] = m["code"]
+                            res["Наименование нормы"] = m["name"][:150]
+                            res["Тип базы"] = m["base_type"]
+                        else:
+                            res["Код нормы"] = "❌ не найдено"
+                            res["Наименование нормы"] = "—"
+                            res["Тип базы"] = "—"
+                    results_data.append(res)
+                    if len(df) > 0: progress.progress(min((idx+1)/len(df), 1.0))
+
+                progress.empty()
+                if results_data:
+                    results_df = pd.DataFrame(results_data)
+                    st.dataframe(results_df, use_container_width=True, height=500)
+                    st.download_button("📥 Скачать Excel", data=export_vor_to_excel(results_df),
+                        file_name="ВОР_с_нормами.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True)
+                    total = len(results_data)
+                    mats = sum(1 for r in results_data if r["Код нормы"] == "📦 Материал")
+                    found = sum(1 for r in results_data if r["Код нормы"] and r["Код нормы"] not in ["📦 Материал", "❌ не найдено"])
+                    nf = sum(1 for r in results_data if r["Код нормы"] == "❌ не найдено")
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Всего", total); c2.metric("✅ Найдено", found)
+                    c3.metric("📦 Материалов", mats); c4.metric("❌ Не найдено", nf)
+                    if total > 0: st.info(f"📊 Обработано: {round((found+mats)/total*100)}%")
+        except Exception as e:
+            st.error(f"Ошибка: {e}")
+    else:
+        st.info("📁 Загрузите файл ВОР.")
+
+# ===== ВКЛАДКА 3 =====
 with tab3:
-    st.subheader("Сравнение сметных норм")
+    st.subheader("Сравнение норм")
     col1, col2 = st.columns(2)
-    with col1:
-        norm_a = st.text_input("Норма A:", placeholder="01-01-001-01")
-    with col2:
-        norm_b = st.text_input("Норма B:", placeholder="01-01-001-02")
-    if st.button("⚖️ Сравнить", use_container_width=True) and norm_a and norm_b:
+    with col1: na = st.text_input("Норма A:", placeholder="01-01-001-01")
+    with col2: nb = st.text_input("Норма B:", placeholder="01-01-001-02")
+    if st.button("⚖️ Сравнить", use_container_width=True) and na and nb:
         conn = get_db_connection()
         if conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT code, name, content_text FROM rates WHERE code = ?", (norm_a,))
-            a = cursor.fetchone()
-            cursor.execute("SELECT code, name, content_text FROM rates WHERE code = ?", (norm_b,))
-            b = cursor.fetchone()
+            cur = conn.cursor()
+            cur.execute("SELECT code, name, content_text FROM rates WHERE code = ?", (na,))
+            a = cur.fetchone()
+            cur.execute("SELECT code, name, content_text FROM rates WHERE code = ?", (nb,))
+            b = cur.fetchone()
             if a and b:
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown(f"**{a[0]}**")
-                    st.write(a[1])
-                    st.text(a[2])
-                with col2:
-                    st.markdown(f"**{b[0]}**")
-                    st.write(b[1])
-                    st.text(b[2])
-            else:
-                st.warning("Одна или обе нормы не найдены в базе.")
+                c1, c2 = st.columns(2)
+                with c1: st.markdown(f"**{a[0]}**"); st.write(a[1]); st.text(a[2])
+                with c2: st.markdown(f"**{b[0]}**"); st.write(b[1]); st.text(b[2])
+            else: st.warning("Нормы не найдены.")
 
+# ===== ВКЛАДКА 4 =====
 with tab4:
-    st.subheader("Конъюнктурный анализ материалов")
-    st.markdown("**Шаг 1: Проверка в ФГИС ЦС**")
-    resource_query = st.text_input("Название ресурса:", placeholder="Арматура А500С 12 мм", key="ka_query")
-    if st.button("🔍 Проверить в ФГИС ЦС", use_container_width=True) and resource_query:
-        st.info("🔧 Функция в разработке.")
-    st.divider()
-    st.markdown("**Шаг 2: Загрузка коммерческих предложений**")
-    kp_files = st.file_uploader("Загрузите КП (PDF, Excel):", type=["pdf", "xlsx", "xls"], accept_multiple_files=True, key="kp_upload")
-    if kp_files:
-        st.success(f"Загружено файлов: {len(kp_files)}")
+    st.subheader("Конъюнктурный анализ")
+    rq = st.text_input("Название ресурса:", key="ka_q")
+    if st.button("🔍 Проверить", use_container_width=True) and rq:
+        st.info("🔧 В разработке.")
 
 st.divider()
 st.caption("🏗️ СметаАссистент — ИИ-помощник, а не замена специалиста.")
