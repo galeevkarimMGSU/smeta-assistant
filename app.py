@@ -1,6 +1,6 @@
 """
 СметаАссистент — ИИ-помощник сметчика.
-Полная база ФСНБ-2022 + FTS5-поиск с bm25-ранжированием.
+Полная база ФСНБ-2022 + FTS5-поиск + распределение по разделам.
 """
 
 import streamlit as st
@@ -40,6 +40,11 @@ st.markdown("""
     .detect-box {
         background: #e8f4f8; border-left: 4px solid #2196f3;
         padding: 1rem; border-radius: 6px; margin: 1rem 0;
+    }
+    .section-header {
+        background: #ff6b35; color: white; padding: 0.6rem 1rem;
+        border-radius: 6px; margin: 1.5rem 0 0.5rem 0;
+        font-weight: 700; font-size: 1.05rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -103,6 +108,106 @@ def clean_html(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
+# ===== РАЗДЕЛЫ =====
+SECTIONS_ORDER = [
+    "1. Подготовка территории строительства",
+    "2. Подземная часть",
+    "3. Надземная часть",
+    "4. Инженерные системы",
+    "5. Благоустройство и озеленение",
+    "6. Наружные сети",
+    "7. Прочие работы",
+]
+
+# Ключевые слова для определения раздела (по названию работы)
+SECTION_KEYWORDS = {
+    "1. Подготовка территории строительства": [
+        'вырубка', 'кустарник', 'деревьев', 'геодезическ', 'вынос в натуру',
+        'переустройство', 'вынос кабельн', 'вынос водосток', 'снос',
+        'подготовка территор', 'демонтаж наружн', 'посадка здания',
+    ],
+    "2. Подземная часть": [
+        'земляны', 'разработка грунт', 'обратная засыпка', 'грунт',
+        'фундамент', 'подвал', 'дренаж', 'пристенн', 'гидроизоляц',
+        'бетонная подготовк', 'свая', 'свайн', 'ростверк', 'цоколь подземн',
+        'стены подземн', 'подземн', 'котлован', 'основание под фундамент',
+    ],
+    "3. Надземная часть": [
+        'кладка', 'кирпич', 'стен', 'перегородк', 'перекрыт', 'колонн',
+        'балок', 'кровл', 'потолк', 'пол', 'стяжк', 'штукатур',
+        'облицовк', 'окраск', 'отделк', 'двер', 'окн', 'лестниц',
+        'бетон', 'железобетон', 'монолитн', 'каркас', 'фахверк',
+        'фасад', 'витраж', 'остеклен', 'навесн', 'панел', 'блок',
+        'армирован', 'опалубк', 'мусоропровод', 'входн', 'лоджи',
+        'пробивк', 'сверлен', 'борозд', 'отверст', 'лесов',
+    ],
+    "4. Инженерные системы": [
+        'отоплен', 'вентиляц', 'кондициониров', 'водопровод', 'канализац',
+        'электроснабж', 'электроосвещ', 'электрооборуд', 'слаботочн',
+        'лифт', 'противодымн', 'пожаротушен', 'пожарн', 'сигнализац',
+        'диспетчеризац', 'асу', 'скуд', 'видеонаблюден', 'оздс',
+        'водомерн', 'итп', 'теплоснабж', 'радиофикац', 'телефонизац',
+        'телевиден', 'аскуэ', 'соуэ', 'дератизац',
+    ],
+    "5. Благоустройство и озеленение": [
+        'благоустройств', 'озеленен', 'озелен', 'тротуар', 'газон',
+        'дорожк', 'площадк', 'бортов', 'брусчатк', 'асфальт',
+        'тактильн', 'резинов', 'крошк', 'посадка дерев', 'посадка кустар',
+        'вертикальн планировк', 'проезд', 'автостоянк', 'мусоросборник',
+        'мал.архитект', 'маф',
+    ],
+    "6. Наружные сети": [
+        'наружн', 'сети', 'водоотведен', 'водосток', 'кабельн канализ',
+        'наружн освещен', 'диспетчеризац наружн', 'прокладка',
+    ],
+}
+
+def get_section_by_keywords(work_name):
+    """Определяет раздел по ключевым словам в названии."""
+    if not work_name: return None
+    name_lower = work_name.lower()
+    for section, keywords in SECTION_KEYWORDS.items():
+        for kw in keywords:
+            if kw in name_lower:
+                return section
+    return None
+
+def get_section_by_code(code):
+    """Определяет раздел по коду нормы."""
+    if not code or len(code) < 2: return None
+    try:
+        prefix = int(code[:2])
+    except:
+        return None
+
+    if prefix in [1, 2, 3, 4, 5]:
+        return "2. Подземная часть"
+    if prefix == 49:
+        return "2. Подземная часть"
+    if prefix in [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 46, 47]:
+        return "3. Надземная часть"
+    if prefix in [18, 19, 20]:
+        return "4. Инженерные системы"
+    if prefix in [51, 52, 53]:
+        return "3. Надземная часть"
+    if prefix in [56, 57, 63, 65, 67, 69]:
+        return "3. Надземная часть"
+    return None
+
+def define_section(work_name, rate_code=None):
+    """
+    Определяет раздел для работы.
+    Приоритет: ключевые слова названия → код нормы → Прочие работы.
+    """
+    section = get_section_by_keywords(work_name)
+    if section:
+        return section
+    if rate_code:
+        section = get_section_by_code(rate_code)
+        if section:
+            return section
+    return "7. Прочие работы"
+
 # ===== СТОП-СЛОВА =====
 STOP_WORDS = {
     'с', 'из', 'на', 'по', 'до', 'в', 'и', 'или', 'для', 'при', 'к', 'от',
@@ -111,7 +216,6 @@ STOP_WORDS = {
     'т.д', 'т.п', 'т.е', 'прим'
 }
 
-# ===== ОБЩИЕ ГЛАГОЛЫ (только для fallback-поиска) =====
 COMMON_VERBS = {
     'демонтаж', 'монтаж', 'разборка', 'устройство', 'установка',
     'прокладка', 'снятие', 'кладка', 'заделка', 'ремонт',
@@ -126,7 +230,6 @@ COMMON_VERBS = {
 }
 
 def extract_keywords(text, max_keywords=12, remove_common=False):
-    """Извлекает значимые слова из текста."""
     text = clean_html(text).lower()
     text = re.sub(r'[^\w\s\-]', ' ', text)
     words = text.split()
@@ -140,18 +243,14 @@ def extract_keywords(text, max_keywords=12, remove_common=False):
     return result[:max_keywords]
 
 def stem(word):
-    """Грубая основа слова (убирает последние 1-2 символа)."""
     if len(word) <= 4: return word
     return word[:max(len(word) - 2, 4)]
 
 def escape_fts(word):
-    """Убирает спецсимволы FTS5."""
     return re.sub(r'["()*:^\-]', '', word)
 
 def is_material(work_name, unit_val):
-    """Определяет, является ли строка материалом."""
     work_lower = work_name.lower()
-
     action_verbs = [
         'разборка', 'демонтаж', 'монтаж', 'устройство', 'установка',
         'прокладка', 'снятие', 'кладка', 'заделка', 'ремонт',
@@ -165,7 +264,6 @@ def is_material(work_name, unit_val):
     ]
     if any(v in work_lower for v in action_verbs):
         return False
-
     material_keywords = [
         'лист', 'сетка', 'смесь', 'грунтовка', 'сверло',
         'краска', 'лак', 'эмаль', 'клей', 'мастика', 'герметик', 'пена',
@@ -185,10 +283,8 @@ def is_material(work_name, unit_val):
     return False
 
 def build_fts_query(stems, operator="AND"):
-    """Строит FTS5-запрос из стемов."""
     parts = [f'"{s}"*' for s in stems if s]
-    if not parts:
-        return None
+    if not parts: return None
     return f" {operator} ".join(parts)
 
 def format_rows(rows):
@@ -199,27 +295,15 @@ def format_rows(rows):
     } for r in rows]
 
 def search_norms_fts(query: str, unit_val: str = None, limit=3):
-    """
-    Умный FTS5-поиск с bm25-ранжированием.
-    Стратегия:
-      1. AND всех значимых стемов — максимальная точность.
-      2. AND топ-3 значимых стемов.
-      3. AND топ-2 значимых стемов.
-      4. AND всех стемов (с общими глаголами).
-      5. OR всех стемов (fallback, но с bm25).
-    """
     all_keywords = extract_keywords(query, max_keywords=15, remove_common=False)
-    if not all_keywords:
-        return []
+    if not all_keywords: return []
 
-    # Все стемы
     stems_all = []
     for kw in all_keywords:
         s = escape_fts(stem(kw))
         if len(s) >= 3 and s not in stems_all:
             stems_all.append(s)
 
-    # Стемы без общих глаголов
     specific_keywords = extract_keywords(query, max_keywords=15, remove_common=True)
     stems_specific = []
     for kw in specific_keywords:
@@ -227,15 +311,12 @@ def search_norms_fts(query: str, unit_val: str = None, limit=3):
         if len(s) >= 3 and s not in stems_specific:
             stems_specific.append(s)
 
-    if not stems_all and not stems_specific:
-        return []
+    if not stems_all and not stems_specific: return []
 
     conn = get_db_connection()
-    if conn is None:
-        return []
+    if conn is None: return []
     cursor = conn.cursor()
 
-    # Стратегии по убыванию точности
     strategies = []
     if len(stems_specific) >= 2:
         strategies.append(build_fts_query(stems_specific, "AND"))
@@ -251,8 +332,7 @@ def search_norms_fts(query: str, unit_val: str = None, limit=3):
         strategies.append(build_fts_query(stems_all, "OR"))
 
     for fts_q in strategies:
-        if not fts_q:
-            continue
+        if not fts_q: continue
         try:
             cursor.execute("""
                 SELECT r.code, r.name, r.unit, r.unit_name, r.section, r.base_type,
@@ -265,31 +345,25 @@ def search_norms_fts(query: str, unit_val: str = None, limit=3):
             """, (fts_q,))
             rows = cursor.fetchall()
             if rows:
-                # Python-переранжирование
                 scored = []
                 for row in rows:
                     name_low = row[1].lower()
                     matched = sum(1 for s in stems_all if s in name_low)
-
                     unit_bonus = 0
                     if unit_val:
                         uv = unit_val.lower().strip()
                         row_unit = (row[2] or "").lower()
                         if uv and row_unit and (uv in row_unit or row_unit in uv):
                             unit_bonus = 20
-
                     score = matched * 10 + unit_bonus
                     scored.append((score, row))
-
                 scored.sort(key=lambda x: -x[0])
                 return format_rows([r for _, r in scored[:limit]])
         except Exception:
             continue
-
     return []
 
 def search_norms(query: str, base_types=None, units=None, sort_by="relevance", limit=30):
-    """Простой поиск (для вкладки «Поиск норм»)."""
     conn = get_db_connection()
     if conn is None: return None
     cursor = conn.cursor()
@@ -331,16 +405,13 @@ def export_to_excel(results):
     import io
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment, PatternFill
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Нормы ФСНБ-2022"
+    wb = Workbook(); ws = wb.active; ws.title = "Нормы ФСНБ-2022"
     headers = ["№", "Код нормы", "Наименование", "Ед. изм.", "Тип базы", "Раздел", "Состав работ"]
     ws.append(headers)
-    header_font = Font(bold=True, color="FFFFFF", size=11)
-    header_fill = PatternFill(start_color="FF6B35", end_color="FF6B35", fill_type="solid")
+    hf = Font(bold=True, color="FFFFFF", size=11)
+    hfill = PatternFill(start_color="FF6B35", end_color="FF6B35", fill_type="solid")
     for c, _ in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=c)
-        cell.font = header_font; cell.fill = header_fill
+        cell = ws.cell(row=1, column=c); cell.font = hf; cell.fill = hfill
     for idx, r in enumerate(results, 1):
         ws.append([idx, r["code"], r["name"], f"{r['unit']} ({r['unit_name']})",
                    r["base_type"], r["section"], r["content_text"]])
@@ -354,20 +425,54 @@ def export_to_excel(results):
     buf = io.BytesIO(); wb.save(buf); buf.seek(0); return buf
 
 def export_vor_to_excel(results_df):
+    """Экспорт ВОР с группировкой по разделам — каждый раздел отдельным листом."""
     import io
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment, PatternFill
     from openpyxl.utils import get_column_letter
-    wb = Workbook(); ws = wb.active; ws.title = "ВОР с нормами"
-    headers = list(results_df.columns); ws.append(headers)
-    header_font = Font(bold=True, color="FFFFFF", size=11)
-    header_fill = PatternFill(start_color="FF6B35", end_color="FF6B35", fill_type="solid")
-    for c, _ in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=c)
-        cell.font = header_font; cell.fill = header_fill
-    for _, row in results_df.iterrows(): ws.append(list(row))
-    for c in range(1, len(headers) + 1):
-        ws.column_dimensions[get_column_letter(c)].width = 30
+
+    wb = Workbook()
+    # Первый лист — сводка
+    ws_summary = wb.active
+    ws_summary.title = "Сводка"
+
+    # Группируем
+    grouped = {}
+    for _, row in results_df.iterrows():
+        section = row["Раздел"]
+        grouped.setdefault(section, []).append(row)
+
+    # Сводка
+    ws_summary.append(["Раздел", "Количество работ"])
+    hf = Font(bold=True, color="FFFFFF", size=11)
+    hfill = PatternFill(start_color="FF6B35", end_color="FF6B35", fill_type="solid")
+    for c in [1, 2]:
+        cell = ws_summary.cell(row=1, column=c); cell.font = hf; cell.fill = hfill
+
+    for section in SECTIONS_ORDER:
+        if section in grouped:
+            ws_summary.append([section, len(grouped[section])])
+    ws_summary.column_dimensions['A'].width = 50
+    ws_summary.column_dimensions['B'].width = 20
+
+    # Отдельный лист для каждого раздела
+    for section in SECTIONS_ORDER:
+        if section not in grouped: continue
+        # Имя листа — не длиннее 31 символа
+        sheet_name = section[:31].replace("/", "-").replace("\\", "-").replace("*", "").replace("?", "").replace("[", "").replace("]", "")
+        ws = wb.create_sheet(title=sheet_name)
+
+        headers = list(results_df.columns)
+        ws.append(headers)
+        for c, _ in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=c); cell.font = hf; cell.fill = hfill
+
+        for row in grouped[section]:
+            ws.append(list(row))
+
+        for c in range(1, len(headers) + 1):
+            ws.column_dimensions[get_column_letter(c)].width = 25
+
     buf = io.BytesIO(); wb.save(buf); buf.seek(0); return buf
 
 def get_total_count():
@@ -421,7 +526,7 @@ with st.sidebar:
         format_func=lambda x: {"relevance": "По релевантности", "code": "По коду", "name": "По названию"}[x], index=0)
     result_limit = st.selectbox("Максимум результатов:", options=[10, 30, 50, 100], index=1)
     st.divider()
-    st.caption("Версия 1.5 — bm25-поиск")
+    st.caption("Версия 1.6 — разделы")
     st.caption("© СметаАссистент")
 
 tab1, tab2, tab3, tab4 = st.tabs([
@@ -438,7 +543,7 @@ with tab1:
         search_btn = st.button("🔍 Найти", use_container_width=True)
 
     if search_btn and query:
-        with st.spinner("Ищу в базе ФСНБ..."):
+        with st.spinner("Ищу..."):
             results = search_norms(query, base_types=selected_base_types if selected_base_types else None,
                 units=selected_units if selected_units else None, sort_by=sort_by, limit=result_limit)
             if results is None:
@@ -446,26 +551,21 @@ with tab1:
             elif len(results) == 0:
                 st.warning(f"По запросу «{query}» ничего не найдено.")
             else:
-                col_info, col_export = st.columns([3, 1])
-                with col_info: st.success(f"Найдено: **{len(results)}**")
-                with col_export:
-                    st.download_button("📥 Excel", data=export_to_excel(results),
-                        file_name=f"fsnb_{query.replace(' ','_')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True)
+                st.success(f"Найдено: **{len(results)}**")
                 for r in results:
+                    section = define_section(r["name"], r["code"])
                     st.markdown(f"""
                     <div class="result-card">
                         <div class="result-code">{r["code"]}</div>
                         <div class="result-name">{r["name"]}</div>
-                        <div class="result-meta">📏 <b>{r["unit"]}</b> ({r["unit_name"]}) | 📚 {r["base_type"]}</div>
+                        <div class="result-meta">📏 <b>{r["unit"]}</b> ({r["unit_name"]}) | 📚 {r["base_type"]} | 📂 <b>{section}</b></div>
                     </div>
                     """, unsafe_allow_html=True)
 
 # ===== ВКЛАДКА 2: ВОР =====
 with tab2:
-    st.subheader("Анализ ВОР")
-    st.caption("Загрузите ВОР — ассистент подберёт нормы через FTS5+bm25.")
+    st.subheader("Анализ ВОР с распределением по разделам")
+    st.caption("Загрузите ВОР — ассистент подберёт нормы и распределит их по разделам.")
 
     uploaded_file = st.file_uploader("Файл ВОР (.xlsx, .xls):", type=["xlsx", "xls"])
 
@@ -500,7 +600,7 @@ with tab2:
             df = pd.read_excel(uploaded_file, header=hr)
             st.dataframe(df.head(10), use_container_width=True)
 
-            if st.button("🤖 Подобрать нормы", use_container_width=True):
+            if st.button("🤖 Подобрать нормы и распределить по разделам", use_container_width=True):
                 results_data = []
                 counter = 0
                 progress = st.progress(0)
@@ -528,7 +628,10 @@ with tab2:
 
                     res = {"№": counter, "Работа из ВОР": work_name[:200],
                            "Ед. изм. (ВОР)": unit_val, "Объём": qty_val,
-                           "Код нормы": "", "Наименование нормы": "", "Тип базы": "", "Код вручную": ""}
+                           "Код нормы": "", "Наименование нормы": "", "Тип базы": "",
+                           "Раздел": "", "Код вручную": ""}
+
+                    rate_code = None
 
                     if is_material(work_name, unit_val):
                         res["Код нормы"] = "📦 Материал"
@@ -538,6 +641,7 @@ with tab2:
                         matches = search_norms_fts(work_name, unit_val=unit_val, limit=3)
                         if matches:
                             m = matches[0]
+                            rate_code = m["code"]
                             res["Код нормы"] = m["code"]
                             res["Наименование нормы"] = m["name"][:150]
                             res["Тип базы"] = m["base_type"]
@@ -545,25 +649,58 @@ with tab2:
                             res["Код нормы"] = "❌ не найдено"
                             res["Наименование нормы"] = "—"
                             res["Тип базы"] = "—"
+
+                    # Определяем раздел
+                    res["Раздел"] = define_section(work_name, rate_code)
+
                     results_data.append(res)
                     if len(df) > 0: progress.progress(min((idx+1)/len(df), 1.0))
 
                 progress.empty()
+
                 if results_data:
                     results_df = pd.DataFrame(results_data)
+
+                    # Сортировка по разделам
+                    section_order = {s: i for i, s in enumerate(SECTIONS_ORDER)}
+                    results_df["_sort"] = results_df["Раздел"].map(section_order).fillna(99)
+                    results_df = results_df.sort_values("_sort").drop(columns=["_sort"]).reset_index(drop=True)
+
+                    # Сводка по разделам
+                    st.markdown("### 📊 Сводка по разделам")
+                    section_counts = results_df.groupby("Раздел").size().to_dict()
+
+                    cols = st.columns(3)
+                    col_idx = 0
+                    for section in SECTIONS_ORDER:
+                        if section in section_counts:
+                            with cols[col_idx % 3]:
+                                st.metric(section[:30], f"{section_counts[section]} работ")
+                            col_idx += 1
+
+                    # Таблица результатов
+                    st.markdown("### 🎯 Результаты")
                     st.dataframe(results_df, use_container_width=True, height=500)
-                    st.download_button("📥 Скачать Excel", data=export_vor_to_excel(results_df),
-                        file_name="ВОР_с_нормами.xlsx",
+
+                    # Экспорт
+                    st.download_button("📥 Скачать Excel (с группировкой по разделам)",
+                        data=export_vor_to_excel(results_df),
+                        file_name="ВОР_с_разделами.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         use_container_width=True)
+
+                    # Статистика
                     total = len(results_data)
                     mats = sum(1 for r in results_data if r["Код нормы"] == "📦 Материал")
                     found = sum(1 for r in results_data if r["Код нормы"] and r["Код нормы"] not in ["📦 Материал", "❌ не найдено"])
                     nf = sum(1 for r in results_data if r["Код нормы"] == "❌ не найдено")
+
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Всего", total); c2.metric("✅ Найдено", found)
                     c3.metric("📦 Материалов", mats); c4.metric("❌ Не найдено", nf)
-                    if total > 0: st.info(f"📊 Обработано: {round((found+mats)/total*100)}%")
+                    if total > 0:
+                        st.info(f"📊 Обработано: {round((found+mats)/total*100)}%")
+
         except Exception as e:
             st.error(f"Ошибка: {e}")
     else:
